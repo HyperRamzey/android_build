@@ -2807,8 +2807,10 @@ $(recovery_ramdisk): $(recovery_uncompressed_ramdisk) $(COMPRESSION_COMMAND_DEPS
 
 # $(1): output file
 # $(2): optional kernel file
+# NOTE: changelog.sh is deliberately not called here either; see
+# $(SYSTEM_CHANGELOG) above. $OUT/recovery carries no Changelog.txt (0 matches),
+# so this call was a pure side-effecting writer of $OUT/system/etc.
 define build-recoveryimage-target
-  $(hide) ./vendor/lineage/build/tools/changelog.sh $(TARGET_DEVICE)
   $(MKBOOTIMG) $(if $(strip $(2)),--kernel $(strip $(2))) $(INTERNAL_RECOVERYIMAGE_ARGS) \
                $(INTERNAL_MKBOOTIMG_VERSION_ARGS) \
                $(BOARD_RECOVERY_MKBOOTIMG_ARGS) --output $(1)
@@ -3669,6 +3671,42 @@ $(call declare-license-deps,$(SYSTEM_LINKER_CONFIG),$(INTERNAL_SYSTEMIMAGE_FILES
 FULL_SYSTEMIMAGE_DEPS += $(SYSTEM_LINKER_CONFIG)
 ALL_DEFAULT_INSTALLED_MODULES += $(SYSTEM_LINKER_CONFIG)
 
+# crDroid changelog. changelog.sh writes straight into $(TARGET_OUT)/etc, so
+# the file sits in the staging tree without ever being a declared build
+# output. build_image's --input-directory-filter-file (fed from
+# FULL_SYSTEMIMAGE_DEPS by write-partition-file-list below) therefore dropped
+# it from out/system.img while the OTA path - which never passes that flag -
+# shipped it; the two images differed by exactly those files. Declaring it
+# here puts it in the filter list AND makes BUILT_SYSTEMIMAGE and
+# BUILT_TARGET_FILES_DIR both wait for this edge, so the packaged OTA payload
+# and the gated image read the same bytes.
+#
+# This rule is the ONLY writer. build-systemimage-target and
+# build-recoveryimage-target used to invoke changelog.sh as a side effect, and
+# because BUILT_TARGET_FILES_DIR takes BUILT_SYSTEMIMAGE only under
+# COPY_IMAGES_FOR_TARGET_FILES_ZIP (unset), those were unordered siblings -
+# a second writer is exactly how the two images drift apart again. Do not
+# re-add a call there.
+#
+# SYSTEM_CHANGELOG_BUILD_ID is expanded into the ninja command, so ninja
+# re-runs this rule on every build. That preserves the per-build freshness of
+# the rolling window, which the old in-recipe call used to provide. A phony
+# FORCE prerequisite would also do it, but kati rejects a real file that
+# depends on one ("real file ... depends on PHONY target FORCE").
+# ALL_DEFAULT_INSTALLED_MODULES mirrors the SYSTEM_LINKER_CONFIG precedent
+# directly above.
+SYSTEM_CHANGELOG := $(TARGET_OUT)/etc/Changelog.txt
+SYSTEM_CHANGELOG_BUILD_ID := $(shell date +%s)
+$(SYSTEM_CHANGELOG): vendor/lineage/build/tools/changelog.sh
+	@echo Generating changelog: $@
+	@mkdir -p $(dir $@) && ./vendor/lineage/build/tools/changelog.sh $(TARGET_DEVICE) && echo "  changelog written (build id $(SYSTEM_CHANGELOG_BUILD_ID))"
+	@test -s $@ || { echo "ERROR: changelog.sh did not produce $@" >&2; exit 1; }
+
+$(call declare-1p-target,$(SYSTEM_CHANGELOG),)
+
+FULL_SYSTEMIMAGE_DEPS += $(SYSTEM_CHANGELOG)
+ALL_DEFAULT_INSTALLED_MODULES += $(SYSTEM_CHANGELOG)
+
 # installed file list
 # Depending on anything that $(BUILT_SYSTEMIMAGE) depends on.
 # We put installed-files.txt ahead of image itself in the dependency graph
@@ -3694,8 +3732,10 @@ systemimage_intermediates :=$= $(call intermediates-dir-for,PACKAGING,system)
 BUILT_SYSTEMIMAGE :=$= $(systemimage_intermediates)/system.img
 
 # $(1): output file
+# NOTE: changelog.sh is deliberately not called here. $(SYSTEM_CHANGELOG)
+# above is the single writer; a second one lets the OTA payload and
+# out/system.img disagree.
 define build-systemimage-target
-  $(hide) ./vendor/lineage/build/tools/changelog.sh $(TARGET_DEVICE)
   @echo "Target system fs image: $(1)"
   @mkdir -p $(dir $(1)) $(systemimage_intermediates) && rm -rf $(systemimage_intermediates)/system_image_info.txt
   $(call generate-image-prop-dictionary, $(systemimage_intermediates)/system_image_info.txt,system, \
